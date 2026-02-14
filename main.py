@@ -5,7 +5,6 @@ Railway Backend for LogisticsManager
 """
 
 import os
-import json
 import asyncio
 import logging
 from datetime import datetime, timedelta
@@ -21,7 +20,7 @@ from sqlalchemy.orm import sessionmaker, Session, relationship
 from sqlalchemy.pool import NullPool
 import httpx
 from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, filters
 
 # Configure logging
 logging.basicConfig(
@@ -32,11 +31,20 @@ logger = logging.getLogger(__name__)
 
 # ==================== CONFIGURATION ====================
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://nkxnbvssbdtfniogcdfd.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5reG5idnNzYmR0Zm5pb2djZGZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA0NDQxMDcsImV4cCI6MjA4NjAyMDEwN30.f9DIMzuer5ZGV4_74wqoO8szHYS_lykt5ZrNCuHgBcE")
-SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL", "postgresql://postgres:Margsh2026x2@db.nkxnbvssbdtfniogcdfd.supabase.co:5432/postgres")
+# Railway предоставляет DATABASE_URL автоматически при подключении PostgreSQL
+# Или используем Supabase напрямую через IPv4
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Если DATABASE_URL не задан, используем Supabase с IPv4
+if not DATABASE_URL:
+    # Пробуем подключиться к Supabase через IPv4 прокси или напрямую
+    SUPABASE_PASSWORD = os.getenv("SUPABASE_PASSWORD", "Margsh2026x2")
+    DATABASE_URL = f"postgresql://postgres:{SUPABASE_PASSWORD}@db.nkxnbvssbdtfniogcdfd.supabase.co:5432/postgres"
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8568128078:AAEYfNy5RRdoSgSIA_QjnzzKbMdnB18tk60")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1119439099")  # @pepe116
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1119439099")
+
+logger.info(f"Using database: {DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'local'}")
 
 # ==================== DATABASE MODELS ====================
 
@@ -46,8 +54,8 @@ class CloudOrder(Base):
     __tablename__ = "orders"
     
     id = Column(Integer, primary_key=True)
-    local_id = Column(Integer, nullable=False)  # ID from WPF SQLite
-    order_number = Column(String(50), nullable=False, unique=True)
+    local_id = Column(Integer, nullable=False, index=True)
+    order_number = Column(String(50), nullable=False, unique=True, index=True)
     client_name = Column(String(200), nullable=False)
     container_count = Column(Integer, default=0)
     goods_type = Column(String(100))
@@ -56,7 +64,7 @@ class CloudOrder(Base):
     document_number = Column(String(100))
     chinese_transport_company = Column(String(200))
     iranian_transport_company = Column(String(200))
-    status = Column(String(50), default="New")
+    status = Column(String(50), default="New", index=True)
     status_color = Column(String(20), default="#FFFFFF")
     creation_date = Column(DateTime, default=datetime.utcnow)
     departure_date = Column(DateTime)
@@ -73,19 +81,20 @@ class CloudOrder(Base):
     has_tex = Column(Boolean, default=False)
     notes = Column(Text)
     additional_info = Column(Text)
-    last_sync = Column(DateTime, default=datetime.utcnow)
-    version = Column(Integer, default=1)  # For conflict resolution
+    last_sync = Column(DateTime, default=datetime.utcnow, index=True)
+    version = Column(Integer, default=1)
+    device_id = Column(String(100), index=True)
     
-    containers = relationship("CloudContainer", back_populates="order", cascade="all, delete-orphan")
-    tasks = relationship("CloudTask", back_populates="order", cascade="all, delete-orphan")
+    containers = relationship("CloudContainer", back_populates="order", cascade="all, delete-orphan", lazy="selectin")
+    tasks = relationship("CloudTask", back_populates="order", cascade="all, delete-orphan", lazy="selectin")
 
 class CloudContainer(Base):
     __tablename__ = "containers"
     
     id = Column(Integer, primary_key=True)
-    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
-    local_id = Column(Integer)  # ID from WPF SQLite
-    container_number = Column(String(50))
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True)
+    local_id = Column(Integer)
+    container_number = Column(String(50), index=True)
     container_type = Column(String(50), default="20ft Standard")
     weight = Column(Numeric(10, 2), default=0)
     volume = Column(Numeric(10, 2), default=0)
@@ -109,12 +118,12 @@ class CloudTask(Base):
     __tablename__ = "tasks"
     
     id = Column(Integer, primary_key=True)
-    local_id = Column(Integer, nullable=False)
-    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
+    local_id = Column(Integer, nullable=False, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True)
     description = Column(String(500), nullable=False)
     assigned_to = Column(String(100))
-    status = Column(String(20), default="ToDo")  # ToDo, InProgress, Completed
-    priority = Column(String(20), default="Medium")  # Low, Medium, High, Critical
+    status = Column(String(20), default="ToDo", index=True)
+    priority = Column(String(20), default="Medium")
     due_date = Column(DateTime)
     created_date = Column(DateTime, default=datetime.utcnow)
     last_sync = Column(DateTime, default=datetime.utcnow)
@@ -125,12 +134,12 @@ class SyncLog(Base):
     __tablename__ = "sync_logs"
     
     id = Column(Integer, primary_key=True)
-    device_id = Column(String(100))  # Identifier for WPF installation
-    sync_type = Column(String(20))  # "upload", "download", "conflict"
+    device_id = Column(String(100), index=True)
+    sync_type = Column(String(20))
     records_synced = Column(Integer, default=0)
-    status = Column(String(20))  # "success", "error", "partial"
+    status = Column(String(20))
     message = Column(Text)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
 
 # ==================== PYDANTIC MODELS ====================
 
@@ -155,7 +164,7 @@ class ContainerModel(BaseModel):
 
 class TaskModel(BaseModel):
     id: Optional[int] = None
-    task_id: Optional[int] = None  # local_id
+    task_id: Optional[int] = None
     order_id: int
     description: str
     assigned_to: Optional[str] = None
@@ -211,7 +220,7 @@ class SyncResponse(BaseModel):
     server_time: datetime = Field(default_factory=datetime.utcnow)
 
 class ReportRequest(BaseModel):
-    report_type: str  # "daily", "weekly", "monthly", "all_active", "drivers"
+    report_type: str
     date_from: Optional[datetime] = None
     date_to: Optional[datetime] = None
     status_filter: Optional[List[str]] = None
@@ -236,7 +245,7 @@ async def start_telegram_bot():
     """Initialize and start Telegram bot"""
     global telegram_app
     
-    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "your_telegram_token_here":
+    if not TELEGRAM_TOKEN or "your_telegram_token" in TELEGRAM_TOKEN.lower():
         logger.warning("Telegram token not configured, bot will not start")
         return
     
@@ -258,7 +267,7 @@ async def start_telegram_bot():
         await telegram_app.start()
         
         # Start polling in background
-        asyncio.create_task(telegram_app.updater.start_polling())
+        asyncio.create_task(telegram_app.updater.start_polling(drop_pending_updates=True))
         
         logger.info("Telegram bot started successfully")
     except Exception as e:
@@ -314,9 +323,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generate and send report"""
+    db = SessionLocal()
     try:
-        db = SessionLocal()
-        
         # Get statistics
         total_orders = db.query(CloudOrder).count()
         active_orders = db.query(CloudOrder).filter(
@@ -369,17 +377,17 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         
         await update.message.reply_text(report, parse_mode='Markdown')
-        db.close()
         
     except Exception as e:
         logger.error(f"Error generating report: {e}")
         await update.message.reply_text("❌ Ошибка при генерации отчета")
+    finally:
+        db.close()
 
 async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List active orders"""
+    db = SessionLocal()
     try:
-        db = SessionLocal()
-        
         orders = db.query(CloudOrder).filter(
             CloudOrder.status.in_(["New", "In Progress CHN", "In Transit CHN-IR", 
                                   "In Progress IR", "In Transit IR-TKM"])
@@ -387,7 +395,6 @@ async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not orders:
             await update.message.reply_text("📭 Нет активных заказов")
-            db.close()
             return
         
         message = "📋 *АКТИВНЫЕ ЗАКАЗЫ:*\n\n"
@@ -411,29 +418,27 @@ async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 """
         
-        message += f"_Всего показано: {len(orders)} из {db.query(CloudOrder).filter(CloudOrder.status.in_(['New', 'In Progress CHN', 'In Transit CHN-IR', 'In Progress IR', 'In Transit IR-TKM'])).count()}_"
+        message += f"_Всего показано: {len(orders)}_"
         
         await update.message.reply_text(message, parse_mode='Markdown')
-        db.close()
         
     except Exception as e:
         logger.error(f"Error listing orders: {e}")
         await update.message.reply_text("❌ Ошибка при получении списка заказов")
+    finally:
+        db.close()
 
 async def cmd_drivers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List drivers on the road"""
+    db = SessionLocal()
     try:
-        db = SessionLocal()
-        
-        # Get containers with driver info that are in transit
         containers = db.query(CloudContainer).join(CloudOrder).filter(
             CloudContainer.driver_first_name != None,
             CloudOrder.status.in_(["In Transit CHN-IR", "In Transit IR-TKM", "In Progress IR"])
-        ).all()
+        ).limit(20).all()
         
         if not containers:
             await update.message.reply_text("📭 Нет водителей в рейсе")
-            db.close()
             return
         
         message = "🚛 *ВОДИТЕЛИ В РЕЙСЕ:*\n\n"
@@ -452,20 +457,19 @@ async def cmd_drivers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
         
         await update.message.reply_text(message, parse_mode='Markdown')
-        db.close()
         
     except Exception as e:
         logger.error(f"Error listing drivers: {e}")
         await update.message.reply_text("❌ Ошибка при получении списка водителей")
+    finally:
+        db.close()
 
 async def cmd_sync_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show sync status"""
+    db = SessionLocal()
     try:
-        db = SessionLocal()
-        
         last_sync = db.query(SyncLog).order_by(SyncLog.timestamp.desc()).first()
         
-        # Sync stats for last 7 days
         week_ago = datetime.utcnow() - timedelta(days=7)
         syncs_week = db.query(SyncLog).filter(SyncLog.timestamp >= week_ago).count()
         
@@ -498,11 +502,12 @@ _Синхронизация происходит автоматически пр
         """
         
         await update.message.reply_text(message, parse_mode='Markdown')
-        db.close()
         
     except Exception as e:
         logger.error(f"Error showing sync status: {e}")
         await update.message.reply_text("❌ Ошибка при получении статуса")
+    finally:
+        db.close()
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search for order"""
@@ -511,23 +516,20 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     search_term = ' '.join(context.args)
+    db = SessionLocal()
     
     try:
-        db = SessionLocal()
-        
         orders = db.query(CloudOrder).filter(
             CloudOrder.order_number.ilike(f'%{search_term}%')
-        ).all()
+        ).limit(5).all()
         
         if not orders:
-            # Try searching by client name or container
             orders = db.query(CloudOrder).filter(
                 CloudOrder.client_name.ilike(f'%{search_term}%')
-            ).all()
+            ).limit(5).all()
         
         if not orders:
             await update.message.reply_text(f"🔍 Заказы по запросу '{search_term}' не найдены")
-            db.close()
             return
         
         message = f"🔍 *РЕЗУЛЬТАТЫ ПОИСКА:* '{search_term}'\n\n"
@@ -535,7 +537,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for order in orders:
             containers_info = ""
             if order.containers:
-                for c in order.containers[:3]:  # Show max 3 containers
+                for c in order.containers[:3]:
                     containers_info += f"  • {c.container_number or '—'}: {c.driver_first_name or ''} {c.driver_last_name or ''}\n"
             
             message += f"""📋 *{order.order_number}*
@@ -548,18 +550,17 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
         
         await update.message.reply_text(message, parse_mode='Markdown')
-        db.close()
         
     except Exception as e:
         logger.error(f"Error searching: {e}")
         await update.message.reply_text("❌ Ошибка при поиске")
+    finally:
+        db.close()
 
 async def cmd_status_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show status summary by route"""
+    db = SessionLocal()
     try:
-        db = SessionLocal()
-        
-        # Group by status and count
         status_data = {}
         for status in ["New", "In Progress CHN", "In Transit CHN-IR", 
                       "In Progress IR", "In Transit IR-TKM", "Completed", "Cancelled"]:
@@ -587,11 +588,12 @@ async def cmd_status_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
         """
         
         await update.message.reply_text(message, parse_mode='Markdown')
-        db.close()
         
     except Exception as e:
         logger.error(f"Error showing status summary: {e}")
         await update.message.reply_text("❌ Ошибка при получении сводки")
+    finally:
+        db.close()
 
 # Notification functions
 async def notify_new_order(order: CloudOrder):
@@ -652,24 +654,45 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     global engine, SessionLocal
     
-    # Startup
     logger.info("Starting up...")
     
     # Initialize database
     try:
+        # Используем правильные параметры подключения для Railway/Supabase
+        connect_args = {}
+        
+        # Для Supabase через IPv6 проблемы, используем IPv4 или прокси
+        if "supabase" in DATABASE_URL:
+            # Добавляем параметры для стабильного подключения
+            connect_args = {
+                "connect_timeout": 10,
+                "options": "-c statement_timeout=30000"
+            }
+        
         engine = create_engine(
-            SUPABASE_DB_URL,
+            DATABASE_URL,
             poolclass=NullPool,  # Required for serverless environment
-            echo=False
+            echo=False,
+            connect_args=connect_args,
+            pool_pre_ping=True,  # Проверка соединения перед использованием
+            pool_recycle=300     # Пересоздание соединений каждые 5 минут
         )
+        
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        
+        # Test connection
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            logger.info("Database connection successful")
         
         # Create tables
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created/verified")
+        
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
-        raise
+        # Не прерываем запуск, работаем в режиме "только Telegram бот"
+        logger.warning("Continuing without database - Telegram bot only mode")
     
     # Start Telegram bot
     await start_telegram_bot()
@@ -692,7 +715,7 @@ app = FastAPI(
 # CORS for WPF client
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure properly for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -703,10 +726,20 @@ app.add_middleware(
 @app.get("/")
 async def root():
     """Health check endpoint"""
+    db_status = "unknown"
+    try:
+        if engine:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            db_status = "connected"
+    except:
+        db_status = "error"
+    
     return {
         "status": "ok",
         "service": "LogisticsManager Cloud API",
         "version": "1.0.0",
+        "database": db_status,
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -714,23 +747,29 @@ async def root():
 async def health_check():
     """Detailed health check"""
     try:
-        db = SessionLocal()
-        db.execute(text("SELECT 1"))
-        db.close()
-        db_status = "connected"
+        if engine:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            db_status = "connected"
+        else:
+            db_status = "not_initialized"
     except Exception as e:
         db_status = f"error: {str(e)}"
     
     return {
         "status": "healthy" if db_status == "connected" else "degraded",
         "database": db_status,
-        "telegram_bot": "running" if telegram_app else "not configured",
+        "telegram_bot": "running" if telegram_app else "not_configured",
         "timestamp": datetime.utcnow().isoformat()
     }
 
 @app.post("/sync", response_model=SyncResponse)
-async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks):
     """Main sync endpoint - WPF uploads data, receives updates"""
+    if not SessionLocal:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    db = SessionLocal()
     try:
         logger.info(f"Sync request from device: {request.device_id}")
         
@@ -747,9 +786,8 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks, db:
                 ).first()
                 
                 if existing:
-                    # Conflict detection: compare versions
+                    # Conflict detection
                     if order_data.version < existing.version:
-                        # WPF has older version, don't overwrite
                         conflicts.append({
                             "order_number": order_data.order_number,
                             "type": "server_newer",
@@ -758,6 +796,8 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks, db:
                         })
                         downloaded += 1
                         continue
+                    
+                    old_status = existing.status
                     
                     # Update existing
                     existing.client_name = order_data.client_name
@@ -786,6 +826,7 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks, db:
                     existing.additional_info = order_data.additional_info
                     existing.version = order_data.version + 1
                     existing.last_sync = datetime.utcnow()
+                    existing.device_id = request.device_id
                     
                     # Clear and recreate containers
                     db.query(CloudContainer).filter(CloudContainer.order_id == existing.id).delete()
@@ -831,6 +872,10 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks, db:
                     
                     uploaded += 1
                     
+                    # Notify about status change
+                    if old_status != existing.status:
+                        await notify_status_change(existing, old_status)
+                    
                 else:
                     # Create new order
                     new_order = CloudOrder(
@@ -862,10 +907,11 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks, db:
                         notes=order_data.notes,
                         additional_info=order_data.additional_info,
                         version=1,
-                        last_sync=datetime.utcnow()
+                        last_sync=datetime.utcnow(),
+                        device_id=request.device_id
                     )
                     db.add(new_order)
-                    db.flush()  # Get the ID
+                    db.flush()
                     
                     # Add containers
                     for container_data in order_data.containers:
@@ -934,7 +980,7 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks, db:
         db.add(sync_log)
         db.commit()
         
-        logger.info(f"Sync completed: {uploaded} uploaded, {downloaded} conflicts")
+        logger.info(f"Sync completed: {uploaded} uploaded, {len(conflicts)} conflicts")
         
         return SyncResponse(
             success=True,
@@ -946,6 +992,7 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks, db:
         
     except Exception as e:
         logger.error(f"Sync error: {e}")
+        db.rollback()
         
         # Log failed sync
         try:
@@ -962,10 +1009,16 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks, db:
             pass
         
         raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+    finally:
+        db.close()
 
 @app.get("/sync/download")
-async def download_data(device_id: str, last_sync: Optional[datetime] = None, db: Session = Depends(get_db)):
+async def download_data(device_id: str, last_sync: Optional[datetime] = None):
     """Download data from cloud - for WPF to get updates"""
+    if not SessionLocal:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    db = SessionLocal()
     try:
         query = db.query(CloudOrder)
         
@@ -1055,10 +1108,16 @@ async def download_data(device_id: str, last_sync: Optional[datetime] = None, db
     except Exception as e:
         logger.error(f"Download error: {e}")
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+    finally:
+        db.close()
 
 @app.post("/report")
-async def generate_report(request: ReportRequest, db: Session = Depends(get_db)):
-    """Generate report - can be called by WPF or scheduled"""
+async def generate_report(request: ReportRequest):
+    """Generate report"""
+    if not SessionLocal:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    db = SessionLocal()
     try:
         query = db.query(CloudOrder)
         
@@ -1073,7 +1132,6 @@ async def generate_report(request: ReportRequest, db: Session = Depends(get_db))
         
         orders = query.all()
         
-        # Calculate statistics
         stats = {
             "total_orders": len(orders),
             "total_containers": sum(o.container_count for o in orders),
@@ -1101,7 +1159,7 @@ async def generate_report(request: ReportRequest, db: Session = Depends(get_db))
                     "container_count": o.container_count,
                     "creation_date": o.creation_date.isoformat() if o.creation_date else None
                 }
-                for o in orders[:50]  # Limit details
+                for o in orders[:50]
             ],
             "generated_at": datetime.utcnow().isoformat()
         }
@@ -1109,10 +1167,16 @@ async def generate_report(request: ReportRequest, db: Session = Depends(get_db))
     except Exception as e:
         logger.error(f"Report generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Report failed: {str(e)}")
+    finally:
+        db.close()
 
 @app.get("/drivers")
-async def get_drivers(status: Optional[str] = None, db: Session = Depends(get_db)):
+async def get_drivers(status: Optional[str] = None):
     """Get drivers information"""
+    if not SessionLocal:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    db = SessionLocal()
     try:
         query = db.query(CloudContainer).join(CloudOrder)
         
@@ -1146,49 +1210,8 @@ async def get_drivers(status: Optional[str] = None, db: Session = Depends(get_db
     except Exception as e:
         logger.error(f"Drivers query error: {e}")
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
-
-# Webhook endpoint for Railway cron jobs
-@app.post("/webhook/scheduled-report")
-async def scheduled_report(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """Endpoint for Railway cron job to trigger daily reports"""
-    try:
-        # Generate daily report
-        yesterday = datetime.utcnow() - timedelta(days=1)
-        
-        new_orders = db.query(CloudOrder).filter(
-            CloudOrder.creation_date >= yesterday
-        ).count()
-        
-        status_changes = db.query(SyncLog).filter(
-            SyncLog.timestamp >= yesterday,
-            SyncLog.sync_type == "upload"
-        ).count()
-        
-        # Send to Telegram
-        if telegram_app and TELEGRAM_CHAT_ID:
-            message = f"""
-📊 *ЕЖЕДНЕВНЫЙ ОТЧЕТ*
-
-*{datetime.now().strftime('%d.%m.%Y')}*
-
-*Новые заказы:* {new_orders}
-*Обновлений:* {status_changes}
-
-Используйте /report для деталей.
-            """
-            
-            background_tasks.add_task(
-                telegram_app.bot.send_message,
-                chat_id=TELEGRAM_CHAT_ID,
-                text=message,
-                parse_mode='Markdown'
-            )
-        
-        return {"success": True, "new_orders": new_orders, "updates": status_changes}
-        
-    except Exception as e:
-        logger.error(f"Scheduled report error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     import uvicorn
