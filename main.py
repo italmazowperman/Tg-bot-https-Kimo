@@ -1,6 +1,6 @@
 """
 Railway Backend for LogisticsManager
-- FastAPI middleware between WPF and Supabase
+- FastAPI middleware between WPF and Railway PostgreSQL
 - Telegram Bot for notifications and reports
 """
 
@@ -13,14 +13,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, text, Column, Integer, String, DateTime, Boolean, Numeric, Text, ForeignKey
+from pydantic import BaseModel, Field, ConfigDict
+from sqlalchemy import create_engine, text, Column, Integer, String, DateTime, Boolean, Numeric, Text, ForeignKey, BigInteger
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from sqlalchemy.pool import NullPool
-import httpx
 from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Configure logging
 logging.basicConfig(
@@ -31,22 +30,106 @@ logger = logging.getLogger(__name__)
 
 # ==================== CONFIGURATION ====================
 
-# Railway предоставляет DATABASE_URL автоматически при подключении PostgreSQL
-# Или используем Supabase напрямую через IPv4
+# Railway предоставляет DATABASE_URL автоматически
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Если DATABASE_URL не задан, используем Supabase с IPv4
 if not DATABASE_URL:
-    # Пробуем подключиться к Supabase через IPv4 прокси или напрямую
-    SUPABASE_PASSWORD = os.getenv("SUPABASE_PASSWORD", "Margsh2026x2")
-    DATABASE_URL = f"postgresql://postgres:{SUPABASE_PASSWORD}@db.nkxnbvssbdtfniogcdfd.supabase.co:5432/postgres"
+    # Fallback для локального тестирования
+    DATABASE_URL = "postgresql://postgres:ZMhXQDvRXVJFDfoAvccbEndHRbKheqXM@shuttle.proxy.rlwy.net:41263/railway"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8568128078:AAEYfNy5RRdoSgSIA_QjnzzKbMdnB18tk60")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1119439099")
 
-logger.info(f"Using database: {DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'local'}")
+logger.info(f"Database URL configured: {DATABASE_URL[:50]}...")
 
-# ==================== DATABASE MODELS ====================
+# ==================== PYDANTIC MODELS (PascalCase для WPF) ====================
+
+class ContainerModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    
+    Id: Optional[int] = Field(None, alias="id")
+    ContainerNumber: Optional[str] = Field(None, alias="container_number")
+    ContainerType: str = Field("20ft Standard", alias="container_type")
+    Weight: float = Field(0, alias="weight")
+    Volume: float = Field(0, alias="volume")
+    LoadingDate: Optional[datetime] = Field(None, alias="loading_date")
+    DepartureDate: Optional[datetime] = Field(None, alias="departure_date")
+    ArrivalIranDate: Optional[datetime] = Field(None, alias="arrival_iran_date")
+    TruckLoadingDate: Optional[datetime] = Field(None, alias="truck_loading_date")
+    ArrivalTurkmenistanDate: Optional[datetime] = Field(None, alias="arrival_turkmenistan_date")
+    ClientReceivingDate: Optional[datetime] = Field(None, alias="client_receiving_date")
+    DriverFirstName: Optional[str] = Field(None, alias="driver_first_name")
+    DriverLastName: Optional[str] = Field(None, alias="driver_last_name")
+    DriverCompany: Optional[str] = Field(None, alias="driver_company")
+    TruckNumber: Optional[str] = Field(None, alias="truck_number")
+    DriverIranPhone: Optional[str] = Field(None, alias="driver_iran_phone")
+    DriverTurkmenistanPhone: Optional[str] = Field(None, alias="driver_turkmenistan_phone")
+
+class TaskModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    
+    TaskId: Optional[int] = Field(None, alias="task_id")
+    OrderId: int = Field(alias="order_id")
+    Description: str = Field(alias="description")
+    AssignedTo: Optional[str] = Field(None, alias="assigned_to")
+    Status: str = Field("ToDo", alias="status")
+    Priority: str = Field("Medium", alias="priority")
+    DueDate: Optional[datetime] = Field(None, alias="due_date")
+    CreatedDate: Optional[datetime] = Field(None, alias="created_date")
+
+class OrderModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    
+    Id: Optional[int] = Field(None, alias="id")
+    OrderNumber: str = Field(alias="order_number")
+    ClientName: str = Field(alias="client_name")
+    ContainerCount: int = Field(0, alias="container_count")
+    GoodsType: Optional[str] = Field(None, alias="goods_type")
+    Route: Optional[str] = Field(None, alias="route")
+    TransitPort: Optional[str] = Field(None, alias="transit_port")
+    DocumentNumber: Optional[str] = Field(None, alias="document_number")
+    ChineseTransportCompany: Optional[str] = Field(None, alias="chinese_transport_company")
+    IranianTransportCompany: Optional[str] = Field(None, alias="iranian_transport_company")
+    Status: str = Field("New", alias="status")
+    StatusColor: Optional[str] = Field("#FFFFFF", alias="status_color")
+    CreationDate: Optional[datetime] = Field(None, alias="creation_date")
+    DepartureDate: Optional[datetime] = Field(None, alias="departure_date")
+    ArrivalIranDate: Optional[datetime] = Field(None, alias="arrival_iran_date")
+    EtaDate: Optional[datetime] = Field(None, alias="eta_date")
+    ArrivalNoticeDate: Optional[datetime] = Field(None, alias="arrival_notice_date")
+    TkmDate: Optional[datetime] = Field(None, alias="tkm_date")
+    LoadingDate: Optional[datetime] = Field(None, alias="loading_date")
+    TruckLoadingDate: Optional[datetime] = Field(None, alias="truck_loading_date")
+    ArrivalTurkmenistanDate: Optional[datetime] = Field(None, alias="arrival_turkmenistan_date")
+    ClientReceivingDate: Optional[datetime] = Field(None, alias="client_receiving_date")
+    HasLoadingPhoto: bool = Field(False, alias="has_loading_photo")
+    HasLocalCharges: bool = Field(False, alias="has_local_charges")
+    HasTex: bool = Field(False, alias="has_tex")
+    Notes: Optional[str] = Field(None, alias="notes")
+    AdditionalInfo: Optional[str] = Field(None, alias="additional_info")
+    Version: int = Field(1, alias="version")
+    
+    Containers: List[ContainerModel] = Field([], alias="containers")
+    Tasks: List[TaskModel] = Field([], alias="tasks")
+
+class SyncRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    
+    DeviceId: str = Field(alias="device_id")
+    LastSync: Optional[datetime] = Field(None, alias="last_sync")
+    Orders: List[OrderModel] = Field([], alias="orders")
+
+class SyncResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    
+    Success: bool = Field(alias="success")
+    Message: str = Field(alias="message")
+    OrdersUploaded: int = Field(0, alias="orders_uploaded")
+    OrdersDownloaded: int = Field(0, alias="orders_downloaded")
+    Conflicts: List[Dict[str, Any]] = Field([], alias="conflicts")
+    ServerTime: datetime = Field(default_factory=datetime.utcnow, alias="server_time")
+
+# ==================== DATABASE MODELS (SQLAlchemy) ====================
 
 Base = declarative_base()
 
@@ -141,94 +224,11 @@ class SyncLog(Base):
     message = Column(Text)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
 
-# ==================== PYDANTIC MODELS ====================
-
-class ContainerModel(BaseModel):
-    id: Optional[int] = None
-    container_number: Optional[str] = None
-    container_type: str = "20ft Standard"
-    weight: float = 0
-    volume: float = 0
-    loading_date: Optional[datetime] = None
-    departure_date: Optional[datetime] = None
-    arrival_iran_date: Optional[datetime] = None
-    truck_loading_date: Optional[datetime] = None
-    arrival_turkmenistan_date: Optional[datetime] = None
-    client_receiving_date: Optional[datetime] = None
-    driver_first_name: Optional[str] = None
-    driver_last_name: Optional[str] = None
-    driver_company: Optional[str] = None
-    truck_number: Optional[str] = None
-    driver_iran_phone: Optional[str] = None
-    driver_turkmenistan_phone: Optional[str] = None
-
-class TaskModel(BaseModel):
-    id: Optional[int] = None
-    task_id: Optional[int] = None
-    order_id: int
-    description: str
-    assigned_to: Optional[str] = None
-    status: str = "ToDo"
-    priority: str = "Medium"
-    due_date: Optional[datetime] = None
-    created_date: Optional[datetime] = None
-
-class OrderModel(BaseModel):
-    id: Optional[int] = None
-    order_number: str
-    client_name: str
-    container_count: int = 0
-    goods_type: Optional[str] = None
-    route: Optional[str] = None
-    transit_port: Optional[str] = None
-    document_number: Optional[str] = None
-    chinese_transport_company: Optional[str] = None
-    iranian_transport_company: Optional[str] = None
-    status: str = "New"
-    status_color: Optional[str] = "#FFFFFF"
-    creation_date: Optional[datetime] = None
-    departure_date: Optional[datetime] = None
-    arrival_iran_date: Optional[datetime] = None
-    eta_date: Optional[datetime] = None
-    arrival_notice_date: Optional[datetime] = None
-    tkm_date: Optional[datetime] = None
-    loading_date: Optional[datetime] = None
-    truck_loading_date: Optional[datetime] = None
-    arrival_turkmenistan_date: Optional[datetime] = None
-    client_receiving_date: Optional[datetime] = None
-    has_loading_photo: bool = False
-    has_local_charges: bool = False
-    has_tex: bool = False
-    notes: Optional[str] = None
-    additional_info: Optional[str] = None
-    version: int = 1
-    
-    containers: List[ContainerModel] = []
-    tasks: List[TaskModel] = []
-
-class SyncRequest(BaseModel):
-    device_id: str
-    last_sync: Optional[datetime] = None
-    orders: List[OrderModel] = []
-
-class SyncResponse(BaseModel):
-    success: bool
-    message: str
-    orders_uploaded: int = 0
-    orders_downloaded: int = 0
-    conflicts: List[Dict[str, Any]] = []
-    server_time: datetime = Field(default_factory=datetime.utcnow)
-
-class ReportRequest(BaseModel):
-    report_type: str
-    date_from: Optional[datetime] = None
-    date_to: Optional[datetime] = None
-    status_filter: Optional[List[str]] = None
-
-# ==================== DATABASE SETUP ====================
+# ==================== GLOBALS ====================
 
 engine = None
 SessionLocal = None
+telegram_app: Optional[Application] = None
 
 def get_db():
     db = SessionLocal()
@@ -239,14 +239,12 @@ def get_db():
 
 # ==================== TELEGRAM BOT ====================
 
-telegram_app: Optional[Application] = None
-
 async def start_telegram_bot():
     """Initialize and start Telegram bot"""
     global telegram_app
     
-    if not TELEGRAM_TOKEN or "your_telegram_token" in TELEGRAM_TOKEN.lower():
-        logger.warning("Telegram token not configured, bot will not start")
+    if not TELEGRAM_TOKEN or len(TELEGRAM_TOKEN) < 20:
+        logger.warning("Telegram token not configured properly, bot will not start")
         return
     
     try:
@@ -282,7 +280,6 @@ async def stop_telegram_bot():
 
 # Telegram command handlers
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send welcome message"""
     welcome_text = """
 🚛 *Margiana Logistics Reporting Bot*
 
@@ -302,7 +299,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show help"""
     help_text = """
 *Как использовать бота:*
 
@@ -322,17 +318,18 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate and send report"""
+    if not SessionLocal:
+        await update.message.reply_text("❌ База данных недоступна")
+        return
+    
     db = SessionLocal()
     try:
-        # Get statistics
         total_orders = db.query(CloudOrder).count()
         active_orders = db.query(CloudOrder).filter(
             CloudOrder.status.in_(["New", "In Progress CHN", "In Transit CHN-IR", 
                                   "In Progress IR", "In Transit IR-TKM"])
         ).count()
         
-        # Status breakdown
         status_counts = {}
         for status in ["New", "In Progress CHN", "In Transit CHN-IR", 
                       "In Progress IR", "In Transit IR-TKM", "Completed"]:
@@ -340,11 +337,9 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if count > 0:
                 status_counts[status] = count
         
-        # Recent updates (last 24 hours)
         yesterday = datetime.utcnow() - timedelta(hours=24)
         recent_syncs = db.query(SyncLog).filter(SyncLog.timestamp >= yesterday).count()
         
-        # Container stats
         total_containers = db.query(CloudContainer).count()
         
         report = f"""
@@ -385,7 +380,10 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List active orders"""
+    if not SessionLocal:
+        await update.message.reply_text("❌ База данных недоступна")
+        return
+    
     db = SessionLocal()
     try:
         orders = db.query(CloudOrder).filter(
@@ -429,7 +427,10 @@ async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def cmd_drivers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List drivers on the road"""
+    if not SessionLocal:
+        await update.message.reply_text("❌ База данных недоступна")
+        return
+    
     db = SessionLocal()
     try:
         containers = db.query(CloudContainer).join(CloudOrder).filter(
@@ -465,7 +466,10 @@ async def cmd_drivers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def cmd_sync_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show sync status"""
+    if not SessionLocal:
+        await update.message.reply_text("❌ База данных недоступна")
+        return
+    
     db = SessionLocal()
     try:
         last_sync = db.query(SyncLog).order_by(SyncLog.timestamp.desc()).first()
@@ -510,9 +514,12 @@ _Синхронизация происходит автоматически пр
         db.close()
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search for order"""
     if not context.args:
         await update.message.reply_text("🔍 Укажите номер заказа для поиска:\n/search ORD-001")
+        return
+    
+    if not SessionLocal:
+        await update.message.reply_text("❌ База данных недоступна")
         return
     
     search_term = ' '.join(context.args)
@@ -558,7 +565,10 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def cmd_status_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show status summary by route"""
+    if not SessionLocal:
+        await update.message.reply_text("❌ База данных недоступна")
+        return
+    
     db = SessionLocal()
     try:
         status_data = {}
@@ -658,24 +668,12 @@ async def lifespan(app: FastAPI):
     
     # Initialize database
     try:
-        # Используем правильные параметры подключения для Railway/Supabase
-        connect_args = {}
-        
-        # Для Supabase через IPv6 проблемы, используем IPv4 или прокси
-        if "supabase" in DATABASE_URL:
-            # Добавляем параметры для стабильного подключения
-            connect_args = {
-                "connect_timeout": 10,
-                "options": "-c statement_timeout=30000"
-            }
-        
         engine = create_engine(
             DATABASE_URL,
-            poolclass=NullPool,  # Required for serverless environment
+            poolclass=NullPool,
             echo=False,
-            connect_args=connect_args,
-            pool_pre_ping=True,  # Проверка соединения перед использованием
-            pool_recycle=300     # Пересоздание соединений каждые 5 минут
+            pool_pre_ping=True,
+            pool_recycle=300
         )
         
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -691,7 +689,6 @@ async def lifespan(app: FastAPI):
         
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
-        # Не прерываем запуск, работаем в режиме "только Telegram бот"
         logger.warning("Continuing without database - Telegram bot only mode")
     
     # Start Telegram bot
@@ -707,7 +704,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="LogisticsManager Cloud API",
-    description="Middleware for WPF-Supabase sync and Telegram notifications",
+    description="Middleware for WPF-Railway PostgreSQL sync and Telegram notifications",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -771,28 +768,28 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks):
     
     db = SessionLocal()
     try:
-        logger.info(f"Sync request from device: {request.device_id}")
+        logger.info(f"Sync request from device: {request.DeviceId}")
         
         uploaded = 0
         downloaded = 0
         conflicts = []
         
         # Process uploaded orders
-        for order_data in request.orders:
+        for order_data in request.Orders:
             try:
                 # Check if order exists
                 existing = db.query(CloudOrder).filter(
-                    CloudOrder.order_number == order_data.order_number
+                    CloudOrder.order_number == order_data.OrderNumber
                 ).first()
                 
                 if existing:
                     # Conflict detection
-                    if order_data.version < existing.version:
+                    if order_data.Version < existing.version:
                         conflicts.append({
-                            "order_number": order_data.order_number,
+                            "order_number": order_data.OrderNumber,
                             "type": "server_newer",
                             "server_version": existing.version,
-                            "client_version": order_data.version
+                            "client_version": order_data.Version
                         })
                         downloaded += 1
                         continue
@@ -800,72 +797,72 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks):
                     old_status = existing.status
                     
                     # Update existing
-                    existing.client_name = order_data.client_name
-                    existing.container_count = order_data.container_count
-                    existing.goods_type = order_data.goods_type
-                    existing.route = order_data.route
-                    existing.transit_port = order_data.transit_port
-                    existing.document_number = order_data.document_number
-                    existing.chinese_transport_company = order_data.chinese_transport_company
-                    existing.iranian_transport_company = order_data.iranian_transport_company
-                    existing.status = order_data.status
-                    existing.status_color = order_data.status_color
-                    existing.departure_date = order_data.departure_date
-                    existing.arrival_iran_date = order_data.arrival_iran_date
-                    existing.eta_date = order_data.eta_date
-                    existing.arrival_notice_date = order_data.arrival_notice_date
-                    existing.tkm_date = order_data.tkm_date
-                    existing.loading_date = order_data.loading_date
-                    existing.truck_loading_date = order_data.truck_loading_date
-                    existing.arrival_turkmenistan_date = order_data.arrival_turkmenistan_date
-                    existing.client_receiving_date = order_data.client_receiving_date
-                    existing.has_loading_photo = order_data.has_loading_photo
-                    existing.has_local_charges = order_data.has_local_charges
-                    existing.has_tex = order_data.has_tex
-                    existing.notes = order_data.notes
-                    existing.additional_info = order_data.additional_info
-                    existing.version = order_data.version + 1
+                    existing.client_name = order_data.ClientName
+                    existing.container_count = order_data.ContainerCount
+                    existing.goods_type = order_data.GoodsType
+                    existing.route = order_data.Route
+                    existing.transit_port = order_data.TransitPort
+                    existing.document_number = order_data.DocumentNumber
+                    existing.chinese_transport_company = order_data.ChineseTransportCompany
+                    existing.iranian_transport_company = order_data.IranianTransportCompany
+                    existing.status = order_data.Status
+                    existing.status_color = order_data.StatusColor
+                    existing.departure_date = order_data.DepartureDate
+                    existing.arrival_iran_date = order_data.ArrivalIranDate
+                    existing.eta_date = order_data.EtaDate
+                    existing.arrival_notice_date = order_data.ArrivalNoticeDate
+                    existing.tkm_date = order_data.TkmDate
+                    existing.loading_date = order_data.LoadingDate
+                    existing.truck_loading_date = order_data.TruckLoadingDate
+                    existing.arrival_turkmenistan_date = order_data.ArrivalTurkmenistanDate
+                    existing.client_receiving_date = order_data.ClientReceivingDate
+                    existing.has_loading_photo = order_data.HasLoadingPhoto
+                    existing.has_local_charges = order_data.HasLocalCharges
+                    existing.has_tex = order_data.HasTex
+                    existing.notes = order_data.Notes
+                    existing.additional_info = order_data.AdditionalInfo
+                    existing.version = order_data.Version + 1
                     existing.last_sync = datetime.utcnow()
-                    existing.device_id = request.device_id
+                    existing.device_id = request.DeviceId
                     
                     # Clear and recreate containers
                     db.query(CloudContainer).filter(CloudContainer.order_id == existing.id).delete()
-                    for container_data in order_data.containers:
+                    for container_data in order_data.Containers:
                         container = CloudContainer(
                             order_id=existing.id,
-                            local_id=container_data.id,
-                            container_number=container_data.container_number,
-                            container_type=container_data.container_type,
-                            weight=container_data.weight,
-                            volume=container_data.volume,
-                            loading_date=container_data.loading_date,
-                            departure_date=container_data.departure_date,
-                            arrival_iran_date=container_data.arrival_iran_date,
-                            truck_loading_date=container_data.truck_loading_date,
-                            arrival_turkmenistan_date=container_data.arrival_turkmenistan_date,
-                            client_receiving_date=container_data.client_receiving_date,
-                            driver_first_name=container_data.driver_first_name,
-                            driver_last_name=container_data.driver_last_name,
-                            driver_company=container_data.driver_company,
-                            truck_number=container_data.truck_number,
-                            driver_iran_phone=container_data.driver_iran_phone,
-                            driver_turkmenistan_phone=container_data.driver_turkmenistan_phone,
+                            local_id=container_data.Id,
+                            container_number=container_data.ContainerNumber,
+                            container_type=container_data.ContainerType,
+                            weight=container_data.Weight,
+                            volume=container_data.Volume,
+                            loading_date=container_data.LoadingDate,
+                            departure_date=container_data.DepartureDate,
+                            arrival_iran_date=container_data.ArrivalIranDate,
+                            truck_loading_date=container_data.TruckLoadingDate,
+                            arrival_turkmenistan_date=container_data.ArrivalTurkmenistanDate,
+                            client_receiving_date=container_data.ClientReceivingDate,
+                            driver_first_name=container_data.DriverFirstName,
+                            driver_last_name=container_data.DriverLastName,
+                            driver_company=container_data.DriverCompany,
+                            truck_number=container_data.TruckNumber,
+                            driver_iran_phone=container_data.DriverIranPhone,
+                            driver_turkmenistan_phone=container_data.DriverTurkmenistanPhone,
                             last_sync=datetime.utcnow()
                         )
                         db.add(container)
                     
                     # Clear and recreate tasks
                     db.query(CloudTask).filter(CloudTask.order_id == existing.id).delete()
-                    for task_data in order_data.tasks:
+                    for task_data in order_data.Tasks:
                         task = CloudTask(
                             order_id=existing.id,
-                            local_id=task_data.task_id,
-                            description=task_data.description,
-                            assigned_to=task_data.assigned_to,
-                            status=task_data.status,
-                            priority=task_data.priority,
-                            due_date=task_data.due_date,
-                            created_date=task_data.created_date,
+                            local_id=task_data.TaskId,
+                            description=task_data.Description,
+                            assigned_to=task_data.AssignedTo,
+                            status=task_data.Status,
+                            priority=task_data.Priority,
+                            due_date=task_data.DueDate,
+                            created_date=task_data.CreatedDate,
                             last_sync=datetime.utcnow()
                         )
                         db.add(task)
@@ -879,76 +876,76 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks):
                 else:
                     # Create new order
                     new_order = CloudOrder(
-                        local_id=order_data.id or 0,
-                        order_number=order_data.order_number,
-                        client_name=order_data.client_name,
-                        container_count=order_data.container_count,
-                        goods_type=order_data.goods_type,
-                        route=order_data.route,
-                        transit_port=order_data.transit_port,
-                        document_number=order_data.document_number,
-                        chinese_transport_company=order_data.chinese_transport_company,
-                        iranian_transport_company=order_data.iranian_transport_company,
-                        status=order_data.status,
-                        status_color=order_data.status_color,
-                        creation_date=order_data.creation_date or datetime.utcnow(),
-                        departure_date=order_data.departure_date,
-                        arrival_iran_date=order_data.arrival_iran_date,
-                        eta_date=order_data.eta_date,
-                        arrival_notice_date=order_data.arrival_notice_date,
-                        tkm_date=order_data.tkm_date,
-                        loading_date=order_data.loading_date,
-                        truck_loading_date=order_data.truck_loading_date,
-                        arrival_turkmenistan_date=order_data.arrival_turkmenistan_date,
-                        client_receiving_date=order_data.client_receiving_date,
-                        has_loading_photo=order_data.has_loading_photo,
-                        has_local_charges=order_data.has_local_charges,
-                        has_tex=order_data.has_tex,
-                        notes=order_data.notes,
-                        additional_info=order_data.additional_info,
+                        local_id=order_data.Id or 0,
+                        order_number=order_data.OrderNumber,
+                        client_name=order_data.ClientName,
+                        container_count=order_data.ContainerCount,
+                        goods_type=order_data.GoodsType,
+                        route=order_data.Route,
+                        transit_port=order_data.TransitPort,
+                        document_number=order_data.DocumentNumber,
+                        chinese_transport_company=order_data.ChineseTransportCompany,
+                        iranian_transport_company=order_data.IranianTransportCompany,
+                        status=order_data.Status,
+                        status_color=order_data.StatusColor,
+                        creation_date=order_data.CreationDate or datetime.utcnow(),
+                        departure_date=order_data.DepartureDate,
+                        arrival_iran_date=order_data.ArrivalIranDate,
+                        eta_date=order_data.EtaDate,
+                        arrival_notice_date=order_data.ArrivalNoticeDate,
+                        tkm_date=order_data.TkmDate,
+                        loading_date=order_data.LoadingDate,
+                        truck_loading_date=order_data.TruckLoadingDate,
+                        arrival_turkmenistan_date=order_data.ArrivalTurkmenistanDate,
+                        client_receiving_date=order_data.ClientReceivingDate,
+                        has_loading_photo=order_data.HasLoadingPhoto,
+                        has_local_charges=order_data.HasLocalCharges,
+                        has_tex=order_data.HasTex,
+                        notes=order_data.Notes,
+                        additional_info=order_data.AdditionalInfo,
                         version=1,
                         last_sync=datetime.utcnow(),
-                        device_id=request.device_id
+                        device_id=request.DeviceId
                     )
                     db.add(new_order)
                     db.flush()
                     
                     # Add containers
-                    for container_data in order_data.containers:
+                    for container_data in order_data.Containers:
                         container = CloudContainer(
                             order_id=new_order.id,
-                            local_id=container_data.id,
-                            container_number=container_data.container_number,
-                            container_type=container_data.container_type,
-                            weight=container_data.weight,
-                            volume=container_data.volume,
-                            loading_date=container_data.loading_date,
-                            departure_date=container_data.departure_date,
-                            arrival_iran_date=container_data.arrival_iran_date,
-                            truck_loading_date=container_data.truck_loading_date,
-                            arrival_turkmenistan_date=container_data.arrival_turkmenistan_date,
-                            client_receiving_date=container_data.client_receiving_date,
-                            driver_first_name=container_data.driver_first_name,
-                            driver_last_name=container_data.driver_last_name,
-                            driver_company=container_data.driver_company,
-                            truck_number=container_data.truck_number,
-                            driver_iran_phone=container_data.driver_iran_phone,
-                            driver_turkmenistan_phone=container_data.driver_turkmenistan_phone,
+                            local_id=container_data.Id,
+                            container_number=container_data.ContainerNumber,
+                            container_type=container_data.ContainerType,
+                            weight=container_data.Weight,
+                            volume=container_data.Volume,
+                            loading_date=container_data.LoadingDate,
+                            departure_date=container_data.DepartureDate,
+                            arrival_iran_date=container_data.ArrivalIranDate,
+                            truck_loading_date=container_data.TruckLoadingDate,
+                            arrival_turkmenistan_date=container_data.ArrivalTurkmenistanDate,
+                            client_receiving_date=container_data.ClientReceivingDate,
+                            driver_first_name=container_data.DriverFirstName,
+                            driver_last_name=container_data.DriverLastName,
+                            driver_company=container_data.DriverCompany,
+                            truck_number=container_data.TruckNumber,
+                            driver_iran_phone=container_data.DriverIranPhone,
+                            driver_turkmenistan_phone=container_data.DriverTurkmenistanPhone,
                             last_sync=datetime.utcnow()
                         )
                         db.add(container)
                     
                     # Add tasks
-                    for task_data in order_data.tasks:
+                    for task_data in order_data.Tasks:
                         task = CloudTask(
                             order_id=new_order.id,
-                            local_id=task_data.task_id,
-                            description=task_data.description,
-                            assigned_to=task_data.assigned_to,
-                            status=task_data.status,
-                            priority=task_data.priority,
-                            due_date=task_data.due_date,
-                            created_date=task_data.created_date or datetime.utcnow(),
+                            local_id=task_data.TaskId,
+                            description=task_data.Description,
+                            assigned_to=task_data.AssignedTo,
+                            status=task_data.Status,
+                            priority=task_data.Priority,
+                            due_date=task_data.DueDate,
+                            created_date=task_data.CreatedDate or datetime.utcnow(),
                             last_sync=datetime.utcnow()
                         )
                         db.add(task)
@@ -959,9 +956,9 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks):
                     background_tasks.add_task(notify_new_order, new_order)
                 
             except Exception as e:
-                logger.error(f"Error processing order {order_data.order_number}: {e}")
+                logger.error(f"Error processing order {order_data.OrderNumber}: {e}")
                 conflicts.append({
-                    "order_number": order_data.order_number,
+                    "order_number": order_data.OrderNumber,
                     "type": "error",
                     "message": str(e)
                 })
@@ -971,7 +968,7 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks):
         
         # Log sync
         sync_log = SyncLog(
-            device_id=request.device_id,
+            device_id=request.DeviceId,
             sync_type="upload",
             records_synced=uploaded,
             status="success" if not conflicts else "partial",
@@ -983,11 +980,11 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks):
         logger.info(f"Sync completed: {uploaded} uploaded, {len(conflicts)} conflicts")
         
         return SyncResponse(
-            success=True,
-            message=f"Synchronized successfully. Uploaded: {uploaded}, Conflicts: {len(conflicts)}",
-            orders_uploaded=uploaded,
-            orders_downloaded=downloaded,
-            conflicts=conflicts
+            Success=True,
+            Message=f"Synchronized successfully. Uploaded: {uploaded}, Conflicts: {len(conflicts)}",
+            OrdersUploaded=uploaded,
+            OrdersDownloaded=downloaded,
+            Conflicts=conflicts
         )
         
     except Exception as e:
@@ -997,7 +994,7 @@ async def sync_data(request: SyncRequest, background_tasks: BackgroundTasks):
         # Log failed sync
         try:
             sync_log = SyncLog(
-                device_id=request.device_id,
+                device_id=request.DeviceId,
                 sync_type="upload",
                 records_synced=0,
                 status="error",
@@ -1030,70 +1027,70 @@ async def download_data(device_id: str, last_sync: Optional[datetime] = None):
         result = []
         for order in orders:
             order_dict = {
-                "id": order.local_id,
-                "order_number": order.order_number,
-                "client_name": order.client_name,
-                "container_count": order.container_count,
-                "goods_type": order.goods_type,
-                "route": order.route,
-                "transit_port": order.transit_port,
-                "document_number": order.document_number,
-                "chinese_transport_company": order.chinese_transport_company,
-                "iranian_transport_company": order.iranian_transport_company,
-                "status": order.status,
-                "status_color": order.status_color,
-                "creation_date": order.creation_date.isoformat() if order.creation_date else None,
-                "departure_date": order.departure_date.isoformat() if order.departure_date else None,
-                "arrival_iran_date": order.arrival_iran_date.isoformat() if order.arrival_iran_date else None,
-                "eta_date": order.eta_date.isoformat() if order.eta_date else None,
-                "arrival_notice_date": order.arrival_notice_date.isoformat() if order.arrival_notice_date else None,
-                "tkm_date": order.tkm_date.isoformat() if order.tkm_date else None,
-                "loading_date": order.loading_date.isoformat() if order.loading_date else None,
-                "truck_loading_date": order.truck_loading_date.isoformat() if order.truck_loading_date else None,
-                "arrival_turkmenistan_date": order.arrival_turkmenistan_date.isoformat() if order.arrival_turkmenistan_date else None,
-                "client_receiving_date": order.client_receiving_date.isoformat() if order.client_receiving_date else None,
-                "has_loading_photo": order.has_loading_photo,
-                "has_local_charges": order.has_local_charges,
-                "has_tex": order.has_tex,
-                "notes": order.notes,
-                "additional_info": order.additional_info,
-                "version": order.version,
-                "last_sync": order.last_sync.isoformat() if order.last_sync else None,
-                "containers": [],
-                "tasks": []
+                "Id": order.local_id,
+                "OrderNumber": order.order_number,
+                "ClientName": order.client_name,
+                "ContainerCount": order.container_count,
+                "GoodsType": order.goods_type,
+                "Route": order.route,
+                "TransitPort": order.transit_port,
+                "DocumentNumber": order.document_number,
+                "ChineseTransportCompany": order.chinese_transport_company,
+                "IranianTransportCompany": order.iranian_transport_company,
+                "Status": order.status,
+                "StatusColor": order.status_color,
+                "CreationDate": order.creation_date.isoformat() if order.creation_date else None,
+                "DepartureDate": order.departure_date.isoformat() if order.departure_date else None,
+                "ArrivalIranDate": order.arrival_iran_date.isoformat() if order.arrival_iran_date else None,
+                "EtaDate": order.eta_date.isoformat() if order.eta_date else None,
+                "ArrivalNoticeDate": order.arrival_notice_date.isoformat() if order.arrival_notice_date else None,
+                "TkmDate": order.tkm_date.isoformat() if order.tkm_date else None,
+                "LoadingDate": order.loading_date.isoformat() if order.loading_date else None,
+                "TruckLoadingDate": order.truck_loading_date.isoformat() if order.truck_loading_date else None,
+                "ArrivalTurkmenistanDate": order.arrival_turkmenistan_date.isoformat() if order.arrival_turkmenistan_date else None,
+                "ClientReceivingDate": order.client_receiving_date.isoformat() if order.client_receiving_date else None,
+                "HasLoadingPhoto": order.has_loading_photo,
+                "HasLocalCharges": order.has_local_charges,
+                "HasTex": order.has_tex,
+                "Notes": order.notes,
+                "AdditionalInfo": order.additional_info,
+                "Version": order.version,
+                "LastSync": order.last_sync.isoformat() if order.last_sync else None,
+                "Containers": [],
+                "Tasks": []
             }
             
             for container in order.containers:
-                order_dict["containers"].append({
-                    "id": container.local_id,
-                    "container_number": container.container_number,
-                    "container_type": container.container_type,
-                    "weight": float(container.weight) if container.weight else 0,
-                    "volume": float(container.volume) if container.volume else 0,
-                    "loading_date": container.loading_date.isoformat() if container.loading_date else None,
-                    "departure_date": container.departure_date.isoformat() if container.departure_date else None,
-                    "arrival_iran_date": container.arrival_iran_date.isoformat() if container.arrival_iran_date else None,
-                    "truck_loading_date": container.truck_loading_date.isoformat() if container.truck_loading_date else None,
-                    "arrival_turkmenistan_date": container.arrival_turkmenistan_date.isoformat() if container.arrival_turkmenistan_date else None,
-                    "client_receiving_date": container.client_receiving_date.isoformat() if container.client_receiving_date else None,
-                    "driver_first_name": container.driver_first_name,
-                    "driver_last_name": container.driver_last_name,
-                    "driver_company": container.driver_company,
-                    "truck_number": container.truck_number,
-                    "driver_iran_phone": container.driver_iran_phone,
-                    "driver_turkmenistan_phone": container.driver_turkmenistan_phone
+                order_dict["Containers"].append({
+                    "Id": container.local_id,
+                    "ContainerNumber": container.container_number,
+                    "ContainerType": container.container_type,
+                    "Weight": float(container.weight) if container.weight else 0,
+                    "Volume": float(container.volume) if container.volume else 0,
+                    "LoadingDate": container.loading_date.isoformat() if container.loading_date else None,
+                    "DepartureDate": container.departure_date.isoformat() if container.departure_date else None,
+                    "ArrivalIranDate": container.arrival_iran_date.isoformat() if container.arrival_iran_date else None,
+                    "TruckLoadingDate": container.truck_loading_date.isoformat() if container.truck_loading_date else None,
+                    "ArrivalTurkmenistanDate": container.arrival_turkmenistan_date.isoformat() if container.arrival_turkmenistan_date else None,
+                    "ClientReceivingDate": container.client_receiving_date.isoformat() if container.client_receiving_date else None,
+                    "DriverFirstName": container.driver_first_name,
+                    "DriverLastName": container.driver_last_name,
+                    "DriverCompany": container.driver_company,
+                    "TruckNumber": container.truck_number,
+                    "DriverIranPhone": container.driver_iran_phone,
+                    "DriverTurkmenistanPhone": container.driver_turkmenistan_phone
                 })
             
             for task in order.tasks:
-                order_dict["tasks"].append({
-                    "task_id": task.local_id,
-                    "order_id": order.local_id,
-                    "description": task.description,
-                    "assigned_to": task.assigned_to,
-                    "status": task.status,
-                    "priority": task.priority,
-                    "due_date": task.due_date.isoformat() if task.due_date else None,
-                    "created_date": task.created_date.isoformat() if task.created_date else None
+                order_dict["Tasks"].append({
+                    "TaskId": task.local_id,
+                    "OrderId": order.local_id,
+                    "Description": task.description,
+                    "AssignedTo": task.assigned_to,
+                    "Status": task.status,
+                    "Priority": task.priority,
+                    "DueDate": task.due_date.isoformat() if task.due_date else None,
+                    "CreatedDate": task.created_date.isoformat() if task.created_date else None
                 })
             
             result.append(order_dict)
@@ -1108,65 +1105,6 @@ async def download_data(device_id: str, last_sync: Optional[datetime] = None):
     except Exception as e:
         logger.error(f"Download error: {e}")
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
-    finally:
-        db.close()
-
-@app.post("/report")
-async def generate_report(request: ReportRequest):
-    """Generate report"""
-    if not SessionLocal:
-        raise HTTPException(status_code=503, detail="Database not available")
-    
-    db = SessionLocal()
-    try:
-        query = db.query(CloudOrder)
-        
-        if request.status_filter:
-            query = query.filter(CloudOrder.status.in_(request.status_filter))
-        
-        if request.date_from:
-            query = query.filter(CloudOrder.creation_date >= request.date_from)
-        
-        if request.date_to:
-            query = query.filter(CloudOrder.creation_date <= request.date_to)
-        
-        orders = query.all()
-        
-        stats = {
-            "total_orders": len(orders),
-            "total_containers": sum(o.container_count for o in orders),
-            "by_status": {},
-            "total_weight": 0
-        }
-        
-        for order in orders:
-            if order.status not in stats["by_status"]:
-                stats["by_status"][order.status] = 0
-            stats["by_status"][order.status] += 1
-            
-            for container in order.containers:
-                stats["total_weight"] += float(container.weight) if container.weight else 0
-        
-        return {
-            "success": True,
-            "report_type": request.report_type,
-            "statistics": stats,
-            "orders": [
-                {
-                    "order_number": o.order_number,
-                    "client_name": o.client_name,
-                    "status": o.status,
-                    "container_count": o.container_count,
-                    "creation_date": o.creation_date.isoformat() if o.creation_date else None
-                }
-                for o in orders[:50]
-            ],
-            "generated_at": datetime.utcnow().isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"Report generation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Report failed: {str(e)}")
     finally:
         db.close()
 
